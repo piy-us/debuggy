@@ -12,30 +12,41 @@ from rich.rule import Rule
 from rich.table import Table
 from rich import box
 from pprint import pformat
-from pydantic import BaseModel, Field
+from rich.console import Console
+from rich.panel import Panel
+from rich.prompt import Confirm
+from rich.syntax import Syntax
+from rich.text import Text
+from rich.rule import Rule
+from rich.table import Table
+from rich import box
+from pprint import pformat
+from pathlib import Path
 
+from pydantic import BaseModel, Field
+from state import ParsedTraceback, StackFrame
 # ── Models ────────────────────────────────────────────────────────────────────
  
-class StackFrame(BaseModel):
-    file: str
-    line: int
-    function: str
-    code: str | None = None
+# class StackFrame(BaseModel):
+#     file: str
+#     line: int
+#     function: str
+#     code: str | None = None
  
  
-class ParsedTraceback(BaseModel):
-    error_type: str
-    error_message: str
+# class ParsedTraceback(BaseModel):
+#     error_type: str
+#     error_message: str
  
-    file: str | None = None
-    line: int | None = None
-    function: str | None = None
+#     file: str | None = None
+#     line: int | None = None
+#     function: str | None = None
  
-    code_snippet: str | None = None
+#     code_snippet: str | None = None
  
-    raw_stderr: str | None = None
+#     raw_stderr: str | None = None
  
-    stack_frames: list[StackFrame] = Field(default_factory=list)
+#     stack_frames: list[StackFrame] = Field(default_factory=list)
 
 # ── Stderr helpers ────────────────────────────────────────────────────────────
  

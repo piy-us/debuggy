@@ -1,367 +1,296 @@
+"""
+agent.py — debuggy repair agent
+"""
+from __future__ import annotations
+
 import json
 import os
 import re
-from typing import List
+from typing import Optional
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field 
-
-from langchain_groq import ChatGroq
 from langchain.agents import create_agent
-
-from langgraph.checkpoint.memory import MemorySaver
+from langchain_core.messages import AIMessage, ToolMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
-# ── Load env ──────────────────────────────────────────────────────────────────
-from langchain_core.rate_limiters  import InMemoryRateLimiter
-load_dotenv()
-from rich.panel import Panel
-from rich.rule import Rule
-from rich.syntax import Syntax
-from rich.pretty import Pretty
-from rich.live import Live
-from rich.text import Text
+from langgraph.checkpoint.memory import MemorySaver
 from rich.console import Console
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.syntax import Syntax
-from rich.pretty import Pretty
-from rich.live import Live
 from rich.table import Table
-from rich.text import Text
-# ── Tools ─────────────────────────────────────────────────────────────────────
 from rich.console import Console
+from rich.panel import Panel
+from rich.prompt import Confirm
+from rich.syntax import Syntax
+from rich.text import Text
+from rich.rule import Rule
+from rich.table import Table
+from rich import box
+from pprint import pformat
+from pathlib import Path
 
-from filesystem import ALL_TOOLS
-#from tools.claude_tools import dev_tools
+from state import AgentContext, AgentOutput, PatchRecord  # your models file
+from tools.filesystem import ALL_TOOLS
+from tools.claude_tools import dev_tools
 import typer
+from patchers import _patch_records
+load_dotenv()
 
-TOOLS =  ALL_TOOLS
 
-# ── Memory ────────────────────────────────────────────────────────────────────
-console        = Console()
-memory = MemorySaver()
+# ══════════════════════════════════════════════════════════════════════════════
+# SYSTEM PROMPT
+# ══════════════════════════════════════════════════════════════════════════════
 
-# ── Model ─────────────────────────────────────────────────────────────────────
+SYSTEM_PROMPT = """
+You are a software repair agent running on a developer's machine. Always reason over entire context so that bug can be identified in fewer steps.
 
-# MODEL = "qwen/qwen3-32b"
+Workflow
+--------
+1. Read the error and context carefully. Think aloud before calling any tool.
+2. Inspect the relevant file(s) — always read before you edit.
+3. Identify the root cause in one sentence.
+4. Apply the minimal fix using replace_lines or write_file.
+5. Stop — the orchestrator will re-run the command and verify.
 
-# llm = ChatGroq(
-#     model=MODEL,
-#     temperature=0.2,
-#     api_key=os.environ.get("GROQ_API_KEY"),
-# )
-from langchain_openai import ChatOpenAI
-# llm = ChatOpenAI(
-#     model="openai/gpt-oss-120b:free",
-#     api_key=os.environ["OPENROUTER_API_KEY"],
-#     base_url="https://openrouter.ai/api/v1",
-#     temperature=0.4,
-#     default_headers={
-#         "HTTP-Referer": "http://localhost:3000",
-#         "X-Title": "debuggy-agent",
-#     },
-# )
-# rate_limiter = InMemoryRateLimiter(
-#     requests_per_second=0.08,  # ~5 per minute
-#     check_every_n_seconds=1,
-#     max_bucket_size=1,
-# )
+Rules
+-----
+- Always read a file before editing it.
+- Minimal edits only. Do not refactor unrelated code.
+- Before each tool call, say what you are doing and why (one sentence).
+- After each tool result, say what you learned (one sentence).
+- Never fake success. If you cannot find the cause, say so honestly.
+- Do not run the command yourself — the orchestrator handles verification.
+- Stop after applying one fix. Do not chain multiple edits speculatively.
+- This is a windows system,
+Final message
+-------------
+End your LAST message with this block (valid JSON, no trailing commas):
+
+<agent_output>
+{"completed": true, "success_likely": true, "summary": "one sentence description of what was fixed",
+ "reasoning_summary": ["identified root cause", "located the line"],
+ "actions_summary": ["read src/foo.py lines 1-20", "replaced dict lookup with .get()"],
+ "files_touched": ["src/foo.py"],
+ "suggested_next_step": null,
+ "confidence": 0.85}
+</agent_output>
+"""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# INFRASTRUCTURE
+# ══════════════════════════════════════════════════════════════════════════════
+
+console = Console()
+memory  = MemorySaver()
 
 llm = ChatGoogleGenerativeAI(
     model="gemini-3.1-flash-lite",
     temperature=0.2,
     api_key=os.environ.get("GEMINI_API_KEY"),
 )
-# ── Structured output ─────────────────────────────────────────────────────────
-from langchain_core.messages import ToolMessage
-from langchain_core.messages import (
-    ToolMessage,
-    AIMessage,
-    HumanMessage,
-)
-from langchain_core.rate_limiters  import InMemoryRateLimiter
-class RepairResponse(BaseModel):
-    reply: str = Field(description="The agent's final reply, including its thought process and reasoning.")
-    thought: str = Field(description="The agent's current thought or reasoning about the bug and the fix.") 
-    actions: List[str] = Field(description="A list of tool calls the agent made, in chronological order.")
-    expected_result: str = Field(description="The expected result of the repair.")
-    status: str = Field(description="The status of the repair attempt.")
-
-# ── System prompt ─────────────────────────────────────────────────────────────
-
-SYSTEM_PROMPT = """
-You are a software repair agent.
-
-Workflow:
-*Always start with greeting the user before any toolcalls, and end with a goodbye after the final response.*
-* Based on the provided error and context, first plan and reason about the root cause of the failure.
-* Then, use the provided tools to inspect the codebase and identify the minimal fix.
-1. Inspect the codebase using tools.
-2. Identify the root cause.
-5. Retry up to 3 times if needed.
-
-Rules:
-- Read snippets from files before editing.
-- Prefer minimal edits.
-- Never fake success.
-- Use only provided tools.
-- Do not invent tool names.
-- Stop after 3 failed attempts.
-
-OS: Windows
-Shell: PowerShell
-Avoid bash utilities like cat/grep/ls.
-Use Get-Content, dir, Select-String.
-
-Output:
-Output should be in the format: {RepairResponse}
-"""
-
-# ── Agent ─────────────────────────────────────────────────────────────────────
 
 agent = create_agent(
     model=llm,
+    tools=ALL_TOOLS+ dev_tools,
     system_prompt=SYSTEM_PROMPT,
     checkpointer=memory,
 )
 
-# ── Config ────────────────────────────────────────────────────────────────────
 
-DEFAULT_CONFIG = {
-    "configurable": {
-        "thread_id": "bugfix-session-1"
-    }
-}
+# ══════════════════════════════════════════════════════════════════════════════
+# CONTEXT SERIALIZER
+# ══════════════════════════════════════════════════════════════════════════════
 
-# ── Public API ────────────────────────────────────────────────────────────────
+def serialize_context(ctx: AgentContext) -> str:
+    """Render AgentContext into a clean labelled prompt string."""
+    lines: list[str] = [
+        f"## Attempt #{ctx.attempt_number}",
+        f"**Command:** `{ctx.command}`",
+        "",
+        "### Current error",
+        "```",
+        str(ctx.current_error),
+        "```",
+    ]
+
+    if ctx.crash_file_code_window:
+        lines += ["", "### Crash site", "```python", ctx.crash_file_code_window, "```"]
+
+    if ctx.modified_files:
+        lines += ["", "### Files modified in previous attempts"]
+        lines += [f"- {f}" for f in ctx.modified_files]
+
+    if ctx.recent_patches:
+        lines += ["", "### Recent patches (last 3)"]
+        for p in ctx.recent_patches:
+            status = "applied" if p.applied else ("rejected by user" if p.approved else "rejected by guard")
+            lines += [f"**{p.file_path}** — {status}", "```diff", p.diff[:600], "```"]
+
+    if ctx.previous_attempts:
+        lines += ["", "### Previous attempts"]
+        for a in ctx.previous_attempts:
+            icon = "✓" if a.success else "✗"
+            lines.append(f"- [{icon}] Attempt {a.attempt_number}: {a.outcome}")
+            if a.next_hypothesis:
+                lines.append(f"  → Suggested next: {a.next_hypothesis}")
+
+    if ctx.recent_reasoning:
+        lines += ["", "### Recent reasoning"]
+        lines += [f"- {r}" for r in ctx.recent_reasoning]
+
+    if ctx.related_symbols:
+        lines += ["", "### Related symbols"]
+        lines += [f"- {s}" for s in ctx.related_symbols]
+
+    if ctx.recent_git_diff:
+        lines += ["", "### Recent git diff", "```diff", ctx.recent_git_diff, "```"]
+
+    lines += ["", "---", "Inspect the repository and apply a fix."]
+    return "\n".join(lines)
 
 
-def ask_agent(
-    prompt: str,
-    thread_id: str = "bugfix-session-2",
-) -> dict:
+# ══════════════════════════════════════════════════════════════════════════════
+# OUTPUT PARSER
+# ══════════════════════════════════════════════════════════════════════════════
 
-    def _fail(reason: str):
-        return (
-            {
-                "thought": reason,
-                "actions": [],
-                "expected_result": "",
-                "status": "failed",
-            },
-            [],
-        )
+def _parse_output(text: str) -> Optional[AgentOutput]:
+    m = re.search(r"<agent_output>\s*(\{.*?})\s*</agent_output>", text, re.DOTALL)
+    if not m:
+        return None
+    try:
+        return AgentOutput(**json.loads(m.group(1)))
+    except Exception:
+        return None
+
+
+def _fallback(reason: str) -> AgentOutput:
+    return AgentOutput(
+        completed=False,
+        success_likely=False,
+        summary=reason,
+        confidence=0.0,
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DISPLAY HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _show_ai(msg: AIMessage) -> None:
+    if getattr(msg, "tool_calls", None):
+        table = Table(border_style="cyan", show_header=False, box=None, padding=(0, 1))
+        table.add_column(style="bold cyan")
+        table.add_column(style="dim white")
+        for tc in msg.tool_calls:
+            table.add_row(tc.get("name", "?"), str(tc.get("args", {}))[:120])
+        console.print(table)
+
+    content = re.sub(r"<agent_output>.*?</agent_output>", "", str(msg.content), flags=re.DOTALL).strip()
+    if content:
+        console.print(Panel(content, title="[bold green]Agent[/bold green]", border_style="green"))
+
+
+def _show_tool(msg: ToolMessage) -> None:
+    name    = getattr(msg, "name", None) or "tool"
+    content = str(msg.content).strip()
+    console.print(f"  [bold cyan]→[/bold cyan] [white]{name}[/white]")
+    if "\n" in content and len(content) < 8_000:
+        lexer = "python" if any(kw in content for kw in ("def ", "import ", "class ")) else "text"
+        console.print(Panel(
+            Syntax(content, lexer, theme="monokai", line_numbers=False),
+            border_style="yellow", padding=(0, 1),
+        ))
+    elif content:
+        console.print(Panel(content[:1000], border_style="yellow", expand=False, padding=(0, 1)))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PUBLIC API
+# ══════════════════════════════════════════════════════════════════════════════
+
+def run_agent(
+    ctx: AgentContext,
+    thread_id: str,
+    patch_records: list[PatchRecord],
+    max_tool_calls: int = 15,
+) -> AgentOutput:
+    """
+    Run one agent session.
+
+    Streams thoughts + tool output to console.
+    Appends PatchRecord entries to patch_records (caller owns the list).
+    Returns a typed AgentOutput — never raises, never returns None.
+    """
+    _patch_records.set(patch_records)  # ← add this line before the stream loop
+
+    prompt     = serialize_context(ctx)
+    config     = {"configurable": {"thread_id": thread_id}}
+    seen:  set[int] = set()
+    final_state     = None
+    tool_call_count = 0
+
+    console.print()
+    console.print(Rule(
+        f"[bold cyan]debuggy  ·  attempt {ctx.attempt_number}[/bold cyan]",
+        style="cyan",
+    ))
 
     try:
-
-        full_input = f"""
-Bug report:
-{prompt}
-
-Use tools to inspect the repository as needed.
-"""
-
-        config = {
-            "configurable": {
-                "thread_id": thread_id
-            },
-            
-        }
-
-        seen_messages = set()
-
-        final_state = None
-
-        console.print()
-        console.print(
-            Rule(
-                "[bold cyan]debuggy agent[/bold cyan]",
-                style="cyan",
-            )
-        )
-
-        #with Live(refresh_per_second=12, console=console) as live:
-
         for chunk in agent.stream(
-            {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": full_input,
-                    }
-                ]
-            },
+            {"messages": [{"role": "user", "content": prompt}]},
             config=config,
             stream_mode="values",
         ):
-
             final_state = chunk
-
-            messages = chunk.get("messages", [])
-            print("messages:", messages)
-
+            messages    = chunk.get("messages", [])
             if not messages:
                 continue
 
             msg = messages[-1]
-
-            # prevent duplicate rendering
-            msg_id = id(msg)
-
-            if msg_id in seen_messages:
+            mid = id(msg)
+            if mid in seen:
                 continue
-
-            seen_messages.add(msg_id)
-
-            # ─────────────────────────────────────
-            # HUMAN
-            # ─────────────────────────────────────
+            seen.add(mid)
 
             if isinstance(msg, AIMessage):
-
-                print("AI Message:", msg)
-            
-
-            # ─────────────────────────────────────
-            # TOOL OUTPUT
-            # ─────────────────────────────────────
+                _show_ai(msg)
 
             elif isinstance(msg, ToolMessage):
+                tool_call_count += 1
+                _show_tool(msg)
 
-                tool_name = msg.name or "tool"
+                # patch_records is populated by apply_fix() inside your tools,
+                # which receives the same list via a context var or direct pass-through.
+                # See tools/filesystem.py for the integration point.
 
-                console.print(
-                    f"[bold cyan]🔧 Running[/bold cyan] [white]{tool_name}[/white]"
-                )
-
-                content = str(msg.content).strip()
-
-                # code/file-like output
-                if "\n" in content and len(content) < 12000:
-
-                    syntax = Syntax(
-                        content,
-                        "python",
-                        theme="monokai",
-                        line_numbers=True,
-                    )
-
-                    console.print(
-                        Panel(
-                            syntax,
-                            title=f"[bold yellow]{tool_name}[/bold yellow]",
-                            border_style="yellow",
-                        )
-                    )
-
-                else:
-
-                    console.print(
-                        Panel(
-                            content,
-                            title=f"[bold yellow]{tool_name}[/bold yellow]",
-                            border_style="yellow",
-                            expand=False,
-                        )
-                    )
-
-            # ─────────────────────────────────────
-            # AI MESSAGE
-            # ─────────────────────────────────────
-
-            elif isinstance(msg, AIMessage):
-
-                # tool planning
-                if getattr(msg, "tool_calls", None):
-
-                    table = Table(
-                        title="Planned Tool Calls",
-                        border_style="cyan",
-                    )
-
-                    table.add_column(
-                        "Tool",
-                        style="bold cyan",
-                    )
-
-                    table.add_column(
-                        "Arguments",
-                        style="white",
-                    )
-
-                    for tc in msg.tool_calls:
-
-                        table.add_row(
-                            tc.get("name", "unknown"),
-                            str(tc.get("args", {})),
-                        )
-
-                    console.print(table)
-
-                # reasoning text
-                if msg.content:
-
-                    console.print(
-                        Panel(
-                            str(msg.content).strip(),
-                            title="[bold green]Agent Thought[/bold green]",
-                            border_style="green",
-                        )
-                    )
-
-    # ─────────────────────────────────────────
-    # FINAL RESPONSE
-    # ─────────────────────────────────────────
-
-        if final_state is None:
-
-            console.print(
-                Panel(
-                    "No final state returned.",
-                    title="[bold red]Agent Failed[/bold red]",
-                    border_style="red",
-                )
-            )
-
-        else:
-
-            final_messages = final_state.get("messages", [])
-
-            last_ai = None
-
-            for m in reversed(final_messages):
-
-                if isinstance(m, AIMessage):
-
-                    last_ai = m
+                if tool_call_count >= max_tool_calls:
+                    console.print(f"  [yellow]Tool call limit ({max_tool_calls}) reached.[/yellow]")
                     break
 
-            if last_ai and last_ai.content:
+    except Exception as exc:
+        console.print(Panel(str(exc), title="[bold red]Agent error[/bold red]", border_style="red"))
+        return _fallback(f"Agent raised: {exc}")
 
-                console.print()
+    # ── Parse structured output ────────────────────────────────────────────────
+    output: Optional[AgentOutput] = None
+    if final_state:
+        for m in reversed(final_state.get("messages", [])):
+            if isinstance(m, AIMessage) and m.content:
+                output = _parse_output(str(m.content))
+                if output:
+                    break
 
-                console.print(
-                    Rule(
-                        "[bold green]Final Result[/bold green]",
-                        style="green",
-                    )
-                )
+    if output is None:
+        console.print(Panel(
+            "No <agent_output> block found.",
+            title="[bold red]Parse failed[/bold red]",
+            border_style="red",
+        ))
+        output = _fallback("Agent finished without structured output.")
 
-                console.print(
-                    Panel(
-                        str(last_ai.content),
-                        border_style="green",
-                    )
-                )
-    except Exception as e:
+    console.print()
+    console.print(Rule("[bold green]Result[/bold green]", style="green"))
+    console.print(Panel(output.model_dump_json(indent=2), border_style="green"))
 
-        console.print(
-            Panel(
-                f"Agent error: {str(e)}",
-                title="[bold red]Agent Error[/bold red]",
-                border_style="red",
-            )  
-    )     
-
-if __name__ == "__main__":
-    ask_agent(prompt="Example bug: TypeError in utils.py line 45 when running 'python main.py'")
+    return output

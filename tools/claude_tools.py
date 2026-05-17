@@ -699,59 +699,82 @@ def insert_at_line(
 
     
 
+# @tool
+# def replace_lines(
+#     path: str,
+#     start_line: int,
+#     end_line: int,
+#     new_text: str,
+# ) -> str:
+#     """
+#     Replace a range of lines in a file.
+
+#     More reliable than exact string replacement.
+
+#     Useful for:
+#     - patching buggy code
+#     - replacing functions
+#     - editing blocks safely
+#     """
+
+#     file_path = safe_path(path)
+
+#     lines = file_path.read_text(
+#         encoding="utf-8",
+#         errors="ignore",
+#     ).splitlines()
+
+#     total = len(lines)
+
+#     if start_line < 1 or end_line > total:
+#         return "Line range out of bounds."
+
+#     if start_line > end_line:
+#         return "Invalid line range."
+
+#     replacement = new_text.splitlines()
+
+#     updated_lines = (
+#         lines[: start_line - 1]
+#         + replacement
+#         + lines[end_line:]
+#     )
+#     updated = "\n".join(updated_lines)
+#     approved = apply_fix(
+#         file_path,
+#         updated,
+#     )
+
+#     if approved:
+#         return (
+#             f"Successfully replaced lines "
+#             f"{start_line}-{end_line} "
+#             f"in {path}"
+#         )
+
+#     return f"Patch rejected for {path}"
 @tool
-def replace_lines(
-    path: str,
-    start_line: int,
-    end_line: int,
-    new_text: str,
-) -> str:
+def replace_lines(path: str, start_line: int, end_line: int, new_text: str) -> str:
     """
     Replace a range of lines in a file.
-
     More reliable than exact string replacement.
-
-    Useful for:
-    - patching buggy code
-    - replacing functions
-    - editing blocks safely
+    Useful for patching buggy code, replacing functions, editing blocks safely.
     """
-
     file_path = safe_path(path)
-
-    lines = file_path.read_text(
-        encoding="utf-8",
-        errors="ignore",
-    ).splitlines()
-
+    lines = file_path.read_text(encoding="utf-8", errors="ignore").splitlines()
     total = len(lines)
 
     if start_line < 1 or end_line > total:
         return "Line range out of bounds."
-
     if start_line > end_line:
         return "Invalid line range."
 
-    replacement = new_text.splitlines()
-
-    updated_lines = (
-        lines[: start_line - 1]
-        + replacement
-        + lines[end_line:]
-    )
-    updated = "\n".join(updated_lines)
-    approved = apply_fix(
-        file_path,
-        updated,
+    updated = "\n".join(
+        lines[: start_line - 1] + new_text.splitlines() + lines[end_line:]
     )
 
-    if approved:
-        return (
-            f"Successfully replaced lines "
-            f"{start_line}-{end_line} "
-            f"in {path}"
-        )
-
+    if apply_fix(file_path, updated):
+        return f"Successfully replaced lines {start_line}-{end_line} in {path}"
     return f"Patch rejected for {path}"
 
 @tool

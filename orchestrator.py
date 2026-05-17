@@ -141,7 +141,7 @@ def cmd_fix(command: str) -> None:
         console.print(f"  [red]Still failing:[/red] {error.error_type}: {error.error_message}")
 
         #Build prompt and call agent (single API call)
-        prompt             = build_prompt(error, command)
+        prompt = build_prompt(error, command)
         print(ask_agent(prompt))
 
     #     # ── Show agent activity (tool calls + results) ────────────────────────

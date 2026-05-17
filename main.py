@@ -1,5 +1,5 @@
 import typer
-from orchestrator import cmd_fix
+from orc2 import cmd_fix
 
 app = typer.Typer(invoke_without_command=True)
 
