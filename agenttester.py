@@ -56,18 +56,24 @@ Rules
 -----
 - Always read a file before editing it.
 - Minimal edits only. Do not refactor unrelated code.
+- If an action_plan is provided with confidence > 0.85, apply it directly
+  without re-investigating. State "following context agent plan" and execute.
+- If the plan looks wrong, say why in one sentence, then apply your own fix.
+
 - Before each tool call, say what you are doing and why (one sentence).
 - After each tool result, say what you learned (one sentence).
 - Never fake success. If you cannot find the cause, say so honestly.
-- Do not run the command yourself — the orchestrator handles verification.
 - Stop after applying one fix. Do not chain multiple edits speculatively.
 - This is a windows system,
+ 
 Final message
 -------------
 End your LAST message with this block (valid JSON, no trailing commas):
 
 <agent_output>
-{"completed": true, "success_likely": true, "summary": "one sentence description of what was fixed",
+{"completed": true, "success_likely": true,
+ "summary": "one sentence description of what was fixed",
+ "plan_followed": true,
  "reasoning_summary": ["identified root cause", "located the line"],
  "actions_summary": ["read src/foo.py lines 1-20", "replaced dict lookup with .get()"],
  "files_touched": ["src/foo.py"],
@@ -75,7 +81,7 @@ End your LAST message with this block (valid JSON, no trailing commas):
  "confidence": 0.85}
 </agent_output>
 """
-
+ 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # INFRASTRUCTURE
@@ -104,15 +110,64 @@ agent = create_agent(
 
 def serialize_context(ctx: AgentContext) -> str:
     """Render AgentContext into a clean labelled prompt string."""
+
     lines: list[str] = [
         f"## Attempt #{ctx.attempt_number}",
         f"**Command:** `{ctx.command}`",
+        "",
+    ]
+
+    # ── NEW: triage + plan go FIRST so they dominate attention ──────────────
+    if ctx.triage:
+        lines += [f"### Triage: {ctx.triage}"]
+
+    if ctx.action_plan:
+        p = ctx.action_plan
+        lines += [
+            "",
+            "### Action plan from context agent",
+            f"**Root cause:** {p.root_cause}",
+            f"**Fix:** {p.fix_description}",
+        ]
+        if p.install_command:
+            lines += [f"**Install:** `{p.install_command}`"]
+        for i, step in enumerate(p.steps, 1):
+            lines += [
+                f"\n**Step {i}** — `{step.file}` line {step.line}",
+                "```diff",
+                f"- {step.find}",
+                f"+ {step.replace}",
+                "```",
+                f"_{step.why}_",
+            ]
+        conf = ctx.context_agent_confidence
+        if conf is not None:
+            lines += [f"\n_Context agent confidence: {conf:.0%}_"]
+        lines += [
+            "",
+            "> If confidence is high and the plan looks correct, apply it directly.",
+            "> If you spot a problem with the plan, explain why and apply your own fix.",
+        ]
+
+    # ── existing fields unchanged below ─────────────────────────────────────
+    lines += [
         "",
         "### Current error",
         "```",
         str(ctx.current_error),
         "```",
     ]
+
+    # ... rest of serialize_context exactly as before ...
+    # lines: list[str] = [
+    #     f"## Attempt #{ctx.attempt_number}",
+    #     f"**Command:** `{ctx.command}`",
+    #     "",
+    #     "### Current error",
+    #     "```",
+    #     str(ctx.current_error),
+    #     "```",
+    # ]
 
     if ctx.crash_file_code_window:
         lines += ["", "### Crash site", "```python", ctx.crash_file_code_window, "```"]

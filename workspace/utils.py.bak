@@ -1,6 +1,0 @@
-import numpy as np
-
-def normalize_name(name):
-    # We can't import SETTINGS here due to circular dependency
-    # For now, just return the lowercased name
-    return name.lower()

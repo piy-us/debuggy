@@ -8,6 +8,26 @@ from time import time
 # ============================================================
 # TRACEBACK MODELS
 # ============================================================
+from typing import Literal
+
+class ActionStep(BaseModel):
+    """One concrete find→replace edit the debug agent should apply."""
+    file: str
+    line: int
+    find: str                  # exact current string in the file
+    replace: str               # exact replacement
+    why: str                   # one sentence explanation
+
+
+class ActionPlan(BaseModel):
+    """
+    Structured plan produced by the context agent.
+    The debug agent should follow this unless it finds a reason not to.
+    """
+    root_cause: str
+    fix_description: str
+    steps: list[ActionStep] = Field(default_factory=list)
+    install_command: str | None = None   # e.g. "pip install httpx"
 
 class StackFrame(BaseModel):
     """
@@ -38,6 +58,7 @@ class ParsedTraceback(BaseModel):
     raw_stderr: str | None = None
 
     stack_frames: list[StackFrame] = Field(default_factory=list)
+
 
 from contextvars import ContextVar
 
@@ -347,6 +368,17 @@ class AgentContext(BaseModel):
     related_symbols: list[str] = Field(
         default_factory=list
     )
+    triage: Literal["TRIVIAL", "NEEDS_INVESTIGATION"] | None = None
+    # Tells the debug agent upfront how hard this is expected to be.
+
+    action_plan: ActionPlan | None = None
+    # Concrete steps from the context agent. If present, the debug
+    # agent should execute these directly rather than re-investigating.
+
+    context_agent_confidence: float | None = None
+    # If high (>0.85), debug agent can skip its own investigation
+    # and go straight to applying the plan.
+
 
 
 # ============================================================
@@ -391,6 +423,8 @@ class AgentOutput(BaseModel):
     )
 
     tokens_used: int | None = None
+    plan_followed: bool | None = None
+
 
 
 # ============================================================

@@ -269,3 +269,4 @@ ALL_TOOLS = [
     replace_in_file,
     run_shell,
 ]
+READ_ONLY_TOOLS=[list_files]

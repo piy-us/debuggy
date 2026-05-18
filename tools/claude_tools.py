@@ -1004,3 +1004,17 @@ dev_tools = [
     tool_find_related_files,
     tool_get_recent_diff 
 ]
+
+CONTEXT_TOOLS=[
+    tool_get_code_window,
+    tool_find_definition,
+    search_codebase,
+
+    tool_get_callees,
+    tool_get_callers,
+    tool_resolve_import,
+    tool_get_class_context,
+    tool_get_locals_at_frame,
+    tool_find_related_files,
+    tool_get_recent_diff
+]
