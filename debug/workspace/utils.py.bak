@@ -1,0 +1,13 @@
+def normalize_name(name):
+    # Deferred import to avoid circular dependency
+    from config import SETTINGS
+    if SETTINGS.get("admin"):
+        import numpy as np
+        return np.string_(name.lower())
+    return name.lower()
+import numpy as np
+
+def normalize_name(name):
+    if SETTINGS.get("admin"):
+        return np.string_(name.lower())
+    return name.lower()
